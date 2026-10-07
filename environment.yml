@@ -1,0 +1,15 @@
+name: gpcr-ecl
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy>=1.24
+  - pandas>=2.0
+  - scipy>=1.11
+  - matplotlib>=3.7
+  - biopython>=1.81
+  - requests>=2.31
+  - jupyterlab
+  - nbconvert
+  - ipykernel
+  - pip
