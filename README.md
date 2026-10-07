@@ -4,8 +4,8 @@ How much genuinely distinct surface is there across the N-terminus and
 ECL1/2/3 of the whole Class A repertoire (orphans included), and where does an
 antibody have room to be specific.
 
-Nothing in here is checked in except code. `data/`, `results/` and `figures/`
-are gitignored and regenerate from scratch with `python run_all.py`.
+Code and figures are checked in. `data/` and `results/` are gitignored and
+regenerate from scratch with `python run_all.py`.
 
 ## Setup
 
@@ -240,6 +240,10 @@ figures/05_displayability.png      charge-hydropathy, FoldIndex, construct calls
 One standalone notebook per figure in `notebooks/`. Each is a `subplot_mosaic`
 of four panels.
 
+`figures/` is tracked in git so these render on GitHub. They are regenerated on
+every run, so re-running the pipeline will show them as modified even when
+nothing meaningful changed — `git checkout figures/` to discard that.
+
 **01_overview — the headline answer.** Segment length (log), the ECDF of
 pairwise identity with the 70% cross-reactivity line marked, number of distinct
 clusters as the identity cut-off is relaxed, and the fraction of each
@@ -247,16 +251,22 @@ receptor's 8-mers that appear nowhere else in Class A. Read the clustering
 panel for "how much space is there" and the k-mer panel for "does this receptor
 have anything of its own".
 
+![01_overview](figures/01_overview.png)
+
 **02_targets — which receptor to go after.** The large panel is identity to
 each receptor's nearest neighbour per segment, with the eight most isolated
 labelled: low means clean specificity headroom. Below it, the extracellular
 cysteine architecture across the class (Cys3.25, ECL2 cysteines, the canonical
 pair, second bonds), and sequon count against length as a glycan-masking proxy.
 
+![02_targets](figures/02_targets.png)
+
 **03_lengths — are the loops really all short.** Overlaid log histograms, ECDFs,
 and the percentage of receptors at or below 10/25/50/100 aa. The three ECLs are
 peptide-scale; the N-terminus is not, and the right-hand tail is the LRR
 ectodomain receptors. Lengths are post-signal-peptide-trim.
+
+![03_lengths](figures/03_lengths.png)
 
 **04_diversity — how different are they really.** PCA of all four segments in
 physicochemical space (log length, charge density, GRAVY, aromaticity, Cys,
@@ -265,11 +275,15 @@ even when their sequences are unrelated. Below, hierarchically clustered
 identity heatmaps for N-term and ECL2: look for whether structure is a few
 tight family blocks on an otherwise flat background.
 
+![04_diversity](figures/04_diversity.png)
+
 **05_displayability — can it be made.** Charge–hydropathy plane with the
 FoldIndex = 0 boundary drawn, FoldIndex against length, the construct-format
 call per segment, and the composite score distribution. Points below the line /
 below zero are disordered, which is the good case for peptide display. Treat
 the format panel as provisional — see the caveats.
+
+![05_displayability](figures/05_displayability.png)
 
 ## Knobs
 
