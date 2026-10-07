@@ -207,48 +207,11 @@ composite, a recommended construct format (linear peptide / cyclic /
 folded ectodomain / cell-surface only), and plain-text flags. A ranking tool for
 deciding where to spend a construct, not a prediction.
 
-### Known problems with the construct-format call — read before using it
+### Before you use `recommended_format`
 
-Two calibration faults in `score_segment()`, found on the first full run
-(287 receptors, 2026-10-07). The sub-scores and flags are still informative;
-the **`recommended_format` column is not trustworthy yet**.
-
-**1. The glycan term is a cliff, not a gradient.** `s_glycan` is
-`clip(1 - (n_glyco/length)*25, 0, 1)`, so for any segment shorter than ~38 aa a
-**single** sequon or annotated glycosite drops it to 0 and forces
-`cell-surface only`. Measured thresholds:
-
-| segment length | sequons needed to force "cell-surface only" |
-|---|---|
-| 10–30 aa | 1 |
-| 40–60 aa | 2 |
-
-That is an artefact of the `*25` scale factor, not a judgement about how much
-surface a glycan actually occludes. It is what pushes 131/287 ECL1, 154/287
-ECL3 and 218/281 N-termini into that bucket. Fix is to scale the penalty by
-the fraction of the segment plausibly occluded by one glycan and to move
-glycan masking into the flags, where it informs rather than decides.
-
-**2. Single-cysteine ECL2 is called `linear peptide`, which is the one call it
-must never get.** ~90% of Class A ECL2s carry exactly one cysteine, and its
-partner is Cys3.25 — in TM3, *outside the loop*. An isolated ECL2 peptide
-therefore carries an unpaired free thiol with no native partner and will
-scramble or dimerise in an oxidising periplasm. The format rule only penalises
-odd cysteine counts **above** one, so `n_cys == 1` falls through to
-`linear peptide` (score ~0.65), while `n_cys == 3` is called `cell-surface
-only` — backwards, since both have a free thiol and the 3-Cys case at least
-has a partner available. Most of the ~160 ECL2s currently called
-`linear peptide` are wrong.
-
-Honest options for a single-Cys ECL2, none of which the code currently emits:
-Cys→Ser and accept the loss of the native constraint; display the loop with an
-engineered flanking Cys to recreate the tether; or go straight to whole-cell.
-The TM3-tether status in `results/disulfide_audit.csv` should be a first-class
-input to the format call, with a `cys_handling` column saying what to do with
-the free thiol.
-
-Until both are fixed, use `fold_index`, `s_length`, `n_cys`, `n_glyco` and the
-`flags` column directly and ignore `recommended_format`.
+Two calibration faults make that column untrustworthy as it stands — see
+"Caveats and future work" at the end. The sub-scores and flags are fine; use
+`fold_index`, `s_length`, `n_cys`, `n_glyco` and `flags` directly for now.
 
 ## Outputs
 
@@ -271,6 +234,42 @@ figures/03_lengths.png             length distributions, ECDF, % under cutoffs
 figures/04_diversity.png           feature-space PCA + clustered identity heatmaps
 figures/05_displayability.png      charge-hydropathy, FoldIndex, construct calls
 ```
+
+## Figures
+
+One standalone notebook per figure in `notebooks/`. Each is a `subplot_mosaic`
+of four panels.
+
+**01_overview — the headline answer.** Segment length (log), the ECDF of
+pairwise identity with the 70% cross-reactivity line marked, number of distinct
+clusters as the identity cut-off is relaxed, and the fraction of each
+receptor's 8-mers that appear nowhere else in Class A. Read the clustering
+panel for "how much space is there" and the k-mer panel for "does this receptor
+have anything of its own".
+
+**02_targets — which receptor to go after.** The large panel is identity to
+each receptor's nearest neighbour per segment, with the eight most isolated
+labelled: low means clean specificity headroom. Below it, the extracellular
+cysteine architecture across the class (Cys3.25, ECL2 cysteines, the canonical
+pair, second bonds), and sequon count against length as a glycan-masking proxy.
+
+**03_lengths — are the loops really all short.** Overlaid log histograms, ECDFs,
+and the percentage of receptors at or below 10/25/50/100 aa. The three ECLs are
+peptide-scale; the N-terminus is not, and the right-hand tail is the LRR
+ectodomain receptors. Lengths are post-signal-peptide-trim.
+
+**04_diversity — how different are they really.** PCA of all four segments in
+physicochemical space (log length, charge density, GRAVY, aromaticity, Cys,
+sequons, G/P) — overlap means two segments are interchangeable to a campaign
+even when their sequences are unrelated. Below, hierarchically clustered
+identity heatmaps for N-term and ECL2: look for whether structure is a few
+tight family blocks on an otherwise flat background.
+
+**05_displayability — can it be made.** Charge–hydropathy plane with the
+FoldIndex = 0 boundary drawn, FoldIndex against length, the construct-format
+call per segment, and the composite score distribution. Points below the line /
+below zero are disordered, which is the good case for peptide display. Treat
+the format panel as provisional — see the caveats.
 
 ## Knobs
 
@@ -301,20 +300,6 @@ stubby rather than annotation gaps.
 LGR4/5/6 and glycoprotein hormone receptor set; check `fshr_human`,
 `tshr_human`, `lgr5_human` are among them.
 
-## Known gaps
-
-- The `recommended_format` column is miscalibrated in two ways — see "Known
-  problems with the construct-format call" above. Fix that before trusting it.
-- Sequence identity is a poor proxy for conformational epitope similarity. An
-  ESM-2 or structure-based (AF2 / GPCRdb structure) comparison is the honest
-  next step for whole-cell panning; not included.
-- Glycosylation is scored as sites/sequons, not occupancy.
-- Orphan status falls back on the GPR naming convention because no GPCRdb
-  family is named "orphan" — see `data/family_tree.csv`. Not verified against
-  an independent orphan list (IUPHAR would be the one to use).
-- Human-only by default. For a counter-screen matrix set `SPECIES = None` and
-  add mouse/cyno orthologues — the pipeline is species-agnostic.
-
 ## Troubleshooting
 
 - **GPCRdb or UniProt 503 / timeouts** — retries with backoff are built in, and
@@ -329,3 +314,55 @@ LGR4/5/6 and glycoprotein hormone receptor set; check `fshr_human`,
   the longest and cost the most.
 - **Figures in DejaVu instead of Arial** — the notebooks print a warning when
   Arial doesn't resolve. Install it or edit `SANS` in `src/style.py`.
+
+## Caveats and future work
+
+Flagged during the build and the first full run, not yet fixed.
+
+### Known bugs in `recommended_format`
+
+**Glycan penalty is a cliff.** `s_glycan = clip(1 - (n_glyco/length)*25, 0, 1)`,
+so for any segment under ~38 aa a **single** sequon drops it to 0 and forces
+`cell-surface only` (40–60 aa needs two). That is the `*25` scale factor, not a
+judgement about occlusion, and it is what puts 131/287 ECL1, 154/287 ECL3 and
+218/281 N-termini in that bucket. Fix: scale by the fraction of the segment one
+glycan plausibly covers, and demote glycan masking to a flag.
+
+**Single-Cys ECL2 is called `linear peptide`.** ~90% of ECL2s carry exactly one
+cysteine whose partner is Cys3.25, in TM3, outside the loop — so the isolated
+peptide has an unpaired free thiol and will scramble or dimerise. The rule only
+penalises odd counts *above* one, so `n_cys == 1` passes while `n_cys == 3` is
+rejected, which is backwards. Most of the ~160 ECL2s called `linear peptide`
+are wrong. Fix: make the TM3-tether status from `disulfide_audit.csv` a
+first-class input and emit a `cys_handling` column (Cys→Ser / engineered
+flanking Cys / whole-cell only).
+
+### Unverified in the current output
+
+- 19 receptors have an ECL3 under 3 aa and 6 have no N-terminus left after
+  signal-peptide trimming. Plausible, but filter `segments_long.csv` to
+  `length < 3` and confirm they are stubby rather than annotation gaps.
+- 13 N-termini called `folded ectodomain` should be the LGR4/5/6 and
+  glycoprotein hormone receptor set. Spot-check `fshr_human`, `tshr_human`,
+  `lgr5_human`.
+- Orphan status falls back on the GPR naming convention because no GPCRdb
+  family is named "orphan" (`data/family_tree.csv` lists what was returned).
+  Not validated against IUPHAR, which is the list to use.
+
+### Method limits
+
+- **Sequence identity is a poor proxy for conformational epitope similarity.**
+  The biggest one. Whole-cell panning selects conformational epitopes on an
+  assembled surface; everything here is linear. An ESM-2 embedding comparison
+  or a structure-based one (AF2 / GPCRdb structures) is the honest next step.
+- The k-mer "private epitope" output is an **upper bound** on linear-epitope
+  specificity, not a design recipe — ECL2 in particular is disulfide-tethered
+  and rarely behaves as a linear epitope.
+- Glycosylation is scored as sites, not occupancy. No information on whether a
+  sequon is actually used or what glycoform sits there.
+- `ECF` is dominated by the N-terminus for receptors with large ectodomains, so
+  its identity values mostly report N-term similarity for those.
+- Human-only by default. A counter-screen matrix needs `SPECIES = None` plus
+  mouse/cyno orthologues; the pipeline is species-agnostic.
+- Aggregation and fold state are sequence heuristics, not predictions. No
+  periplasmic expression data anywhere in the loop.
