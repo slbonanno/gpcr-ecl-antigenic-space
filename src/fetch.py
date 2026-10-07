@@ -17,6 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
+import numpy as np
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
@@ -31,9 +32,11 @@ def session() -> requests.Session:
     global _SESSION
     if _SESSION is None:
         s = requests.Session()
-        retry = Retry(total=5, backoff_factor=0.8,
+        retry = Retry(total=6, backoff_factor=1.5,
                       status_forcelist=(429, 500, 502, 503, 504),
-                      allowed_methods=("GET",))
+                      allowed_methods=("GET",),
+                      respect_retry_after_header=True,
+                      raise_on_status=False)
         s.mount("https://", HTTPAdapter(max_retries=retry, pool_maxsize=32))
         s.headers.update({"User-Agent": "gpcr-ecl-antigenic-space/1.0",
                           "Accept": "application/json"})
@@ -46,21 +49,41 @@ def _cache_path(url: str):
     return C.CACHE / f"{key}.json"
 
 
-def get_json(url: str, allow_404=False):
+def get_json(url: str, allow_404=False, tolerant=False, pause=None):
+    """Cached GET.
+
+    tolerant=True returns None instead of raising when the server is simply
+    unavailable (503/429 after retries, connection reset, read timeout). A
+    transient failure is NEVER written to the cache, so re-running picks it up.
+    A genuine 404 with allow_404 IS cached, because it will stay a 404.
+    """
     p = _cache_path(url)
     if p.exists():
         try:
             return json.loads(p.read_text())
         except json.JSONDecodeError:
             p.unlink()
-    r = session().get(url, timeout=60)
+    try:
+        r = session().get(url, timeout=60)
+    except requests.RequestException as e:
+        if tolerant:
+            return None
+        raise
     if allow_404 and r.status_code == 404:
         p.write_text("null")
         return None
-    r.raise_for_status()
-    obj = r.json()
+    if r.status_code >= 400:
+        if tolerant:
+            return None
+        r.raise_for_status()
+    try:
+        obj = r.json()
+    except ValueError:
+        if tolerant:
+            return None
+        raise
     p.write_text(json.dumps(obj))
-    time.sleep(C.REQUEST_PAUSE)
+    time.sleep(C.REQUEST_PAUSE if pause is None else pause)
     return obj
 
 
@@ -109,9 +132,31 @@ def class_a_proteins() -> pd.DataFrame:
         df = df[df["source"].isin(C.SOURCE_KEEP)]
 
     fp = df["family_path"].fillna("")
+    nm = df["name"].fillna("")
     df["is_olfactory"] = fp.str.contains("olfact", case=False)
     df["is_taste"] = fp.str.contains("taste", case=False)
-    df["is_orphan"] = fp.str.contains("orphan", case=False)
+
+    # Orphan status. GPCRdb does not label every deorphanisation-pending
+    # receptor with the word "orphan" in its family name, so a family-path
+    # match alone silently returns zero. Fall back on the naming convention:
+    # UniProt calls a receptor with no assigned ligand "G-protein coupled
+    # receptor <n>" / "Probable G-protein coupled receptor <n>", and GPCRdb
+    # entry names for those are gpr<n>_human / gprc5a_human etc.
+    by_family = fp.str.contains("orphan", case=False)
+    by_name = nm.str.contains(r"^(?:probable |putative )?g[- ]?protein[- ]coupled receptor",
+                              case=False, regex=True)
+    by_entry = df["entry_name"].str.match(r"^gpr(?:c)?\d", case=False, na=False)
+    df["is_orphan"] = by_family | by_name | by_entry
+    df["orphan_evidence"] = np.select(
+        [by_family, by_name | by_entry], ["family", "naming"], default="")
+
+    if by_family.sum() == 0:
+        print("[fetch] note: no GPCRdb family is named 'orphan'; orphan flag "
+              "fell back to receptor naming convention. Family names are "
+              "dumped to data/family_tree.csv — check them if the count "
+              "looks wrong.")
+    pd.DataFrame(sorted(fam_names.items()), columns=["slug", "name"]).to_csv(
+        C.DATA / "family_tree.csv", index=False)
     if not C.INCLUDE_OLFACTORY:
         df = df[~df["is_olfactory"]]
     if not C.INCLUDE_TASTE:
@@ -119,6 +164,11 @@ def class_a_proteins() -> pd.DataFrame:
 
     df = df.drop_duplicates("entry_name").sort_values("entry_name").reset_index(drop=True)
     df.to_csv(C.DATA / "proteins.csv", index=False)
+
+    top = (df["family_path"].fillna("").str.split(" | ", regex=False)
+             .str[1].fillna("(unclassified)").value_counts())
+    print("[fetch] receptors by top-level family:")
+    print(top.to_string())
     return df
 
 
@@ -126,14 +176,22 @@ def class_a_proteins() -> pd.DataFrame:
 # per-residue segments
 # --------------------------------------------------------------------------
 def residues(entry_name: str):
-    return get_json(f"{C.GPCRDB}/residues/{quote(entry_name)}/", allow_404=True)
+    return get_json(f"{C.GPCRDB}/residues/{quote(entry_name)}/",
+                    allow_404=True, tolerant=True)
 
 
 def residue_table(entry_names, workers=None) -> pd.DataFrame:
     workers = workers or C.N_FETCH_WORKERS
+
+    def safe(en):
+        try:
+            return residues(en)
+        except Exception:
+            return None
+
     out, missing = [], []
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        for en, res in zip(entry_names, ex.map(residues, entry_names)):
+        for en, res in zip(entry_names, ex.map(safe, entry_names)):
             if not res:
                 missing.append(en)
                 continue
@@ -198,37 +256,71 @@ def uniprot_topology(accessions) -> pd.DataFrame:
     return df
 
 
+def _uniprot_batches(accessions, size=None):
+    """UniProt's per-accession endpoint will 503 you off the service if you hit
+    it a few hundred times in parallel. Use the stream endpoint instead and ask
+    for many accessions at once: ~3 requests instead of ~300."""
+    size = size or C.UNIPROT_BATCH
+    accs = [a for a in accessions if isinstance(a, str) and a]
+    for i in range(0, len(accs), size):
+        chunk = accs[i:i + size]
+        q = quote(" OR ".join(f"accession:{a}" for a in chunk))
+        url = ("https://rest.uniprot.org/uniprotkb/stream"
+               f"?query={q}&format=json"
+               "&fields=accession,ft_signal,ft_carbohyd,ft_disulfid")
+        yield chunk, url
+
+
 def uniprot_annotations(accessions) -> pd.DataFrame:
     """Signal peptide end, annotated N-glycosylation positions, annotated
     disulfide pairs. GPCRdb numbering is UniProt numbering, so positions map
-    directly onto the residue table."""
-    def one(acc):
-        return acc, get_json(f"https://rest.uniprot.org/uniprotkb/{acc}.json",
-                             allow_404=True)
+    straight onto the residue table.
+
+    Entirely optional: if UniProt is unreachable this returns an empty frame
+    and the pipeline carries on without signal-peptide trimming.
+    """
+    entries, failed = [], 0
+    for chunk, url in _uniprot_batches(accessions):
+        js = get_json(url, tolerant=True, pause=C.UNIPROT_PAUSE)
+        if js is None:
+            failed += len(chunk)
+            continue
+        entries.extend(js.get("results", js) if isinstance(js, dict) else js)
+
+    if failed:
+        print(f"[fetch] UniProt unreachable for {failed} accessions; "
+              "re-run later to fill them in (nothing was cached)")
+    if not entries:
+        print("[fetch] no UniProt annotations - signal peptides will NOT be "
+              "trimmed and sequons will be used in place of annotated glycans")
+        return pd.DataFrame(columns=["accession", "signal_end", "glyco_pos",
+                                     "disulfide_pairs"])
 
     rows = []
-    with ThreadPoolExecutor(max_workers=C.N_FETCH_WORKERS) as ex:
-        for acc, js in ex.map(one, accessions):
-            if not js:
-                continue
-            sig_end, glyc, ss = 0, [], []
-            for f in js.get("features", []):
-                t = (f.get("type") or "").lower()
-                loc = f.get("location", {})
-                s = (loc.get("start") or {}).get("value")
-                e = (loc.get("end") or {}).get("value")
-                if t == "signal" and e:
-                    sig_end = max(sig_end, int(e))
-                elif t == "glycosylation" and s:
-                    if "n-linked" in (f.get("description") or "").lower() \
-                       or not f.get("description"):
-                        glyc.append(int(s))
-                elif "disulfide" in t and s and e:
-                    ss.append((int(s), int(e)))
-            rows.append({"accession": acc, "signal_end": sig_end,
-                         "glyco_pos": ";".join(map(str, sorted(glyc))),
-                         "disulfide_pairs": ";".join(f"{a}-{b}" for a, b in ss)})
+    for js in entries:
+        acc = js.get("primaryAccession") or js.get("accession")
+        if not acc:
+            continue
+        sig_end, glyc, ss = 0, [], []
+        for f in js.get("features", []):
+            ftype = (f.get("type") or "").lower()
+            loc = f.get("location", {})
+            s = (loc.get("start") or {}).get("value")
+            e = (loc.get("end") or {}).get("value")
+            if ftype == "signal" and e:
+                sig_end = max(sig_end, int(e))
+            elif ftype == "glycosylation" and s:
+                desc = (f.get("description") or "").lower()
+                if "n-linked" in desc or not desc:
+                    glyc.append(int(s))
+            elif "disulfide" in ftype and s and e:
+                ss.append((int(s), int(e)))
+        rows.append({"accession": acc, "signal_end": sig_end,
+                     "glyco_pos": ";".join(map(str, sorted(glyc))),
+                     "disulfide_pairs": ";".join(f"{a}-{b}" for a, b in ss)})
     df = pd.DataFrame(rows)
+    print(f"[fetch] UniProt annotations for {len(df)} accessions; "
+          f"{int((df['signal_end'] > 0).sum())} have a signal peptide")
     df.to_csv(C.DATA / "uniprot_annotations.csv", index=False)
     return df
 

@@ -49,6 +49,8 @@ LRR_MIN_MOTIFS = 3            # leucine-rich repeats -> real folded ectodomain
 
 # --- compute --------------------------------------------------------------
 N_FETCH_WORKERS = 8
+UNIPROT_BATCH = 100           # accessions per UniProt stream query
+UNIPROT_PAUSE = 1.0           # seconds between those queries
 N_ALIGN_WORKERS = None        # None -> os.cpu_count()
 REQUEST_PAUSE = 0.05
 

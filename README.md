@@ -44,7 +44,14 @@ Expect a couple of minutes for the fetch (~300 receptors × 2 API calls) and
 roughly 10–25 min on 8 cores for the pairwise alignments, which dominate.
 
 Needs network access to `gpcrdb.org` and `rest.uniprot.org`. Nothing else is
-remote.
+remote. UniProt is queried in batches of 100 accessions against the stream
+endpoint (3 requests, not 300) — per-accession fan-out gets you rate-limited
+off the service.
+
+Orphan status: GPCRdb does not label every deorphanisation-pending receptor
+with "orphan" in its family name, so the flag falls back on the GPR-naming
+convention. `data/family_tree.csv` lists the family names actually returned —
+worth a look if the orphan count seems off.
 
 Then:
 
@@ -246,8 +253,11 @@ at 0.13 across the board, something upstream broke.
 
 ## Troubleshooting
 
-- **GPCRdb timeouts** — retries are built in; re-run and the cache picks up
-  where it stopped.
+- **GPCRdb or UniProt 503 / timeouts** — retries with backoff are built in, and
+  transient failures are never cached, so just re-run: the cache picks up where
+  it stopped and only the missing calls go out again. The UniProt step is
+  optional — if it can't be reached the run continues without signal-peptide
+  trimming, and `--no-uniprot` skips it outright.
 - **`nan` identities** — segment shorter than `MIN_LOOP_LEN`. Expected for a
   handful of very short ECL3s.
 - **Alignments taking forever** — set `N_ALIGN_WORKERS` in `src/config.py`, or

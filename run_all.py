@@ -46,6 +46,8 @@ def main():
                     help="only N receptors, for a smoke test")
     ap.add_argument("--no-figures", action="store_true",
                     help="skip notebook execution")
+    ap.add_argument("--no-uniprot", action="store_true",
+                    help="skip UniProt annotations entirely")
     a = ap.parse_args()
 
     t0 = time.time()
@@ -54,18 +56,23 @@ def main():
     if a.skip_fetch:
         prot = pd.read_csv(C.DATA / "proteins.csv")
         res = pd.read_csv(C.DATA / "residues.csv.gz")
-        ap = C.DATA / "uniprot_annotations.csv"
-        if ap.exists():
-            annot = pd.read_csv(ap)
+        annot_path = C.DATA / "uniprot_annotations.csv"
+        if annot_path.exists():
+            annot = pd.read_csv(annot_path)
     else:
         prot = fetch.class_a_proteins()
         if a.limit:
             prot = prot.head(a.limit)
         print(f"[fetch] {len(prot)} Class A receptors "
-              f"({int(prot['is_orphan'].sum())} orphan-family)")
+              f"({int(prot['is_orphan'].sum())} flagged orphan)")
         res = fetch.residue_table(prot["entry_name"].tolist())
-        if C.USE_UNIPROT_ANNOT:
-            annot = fetch.uniprot_annotations(prot["accession"].dropna().tolist())
+        if C.USE_UNIPROT_ANNOT and not a.no_uniprot:
+            try:
+                annot = fetch.uniprot_annotations(
+                    prot["accession"].dropna().tolist())
+            except Exception as e:
+                print(f"[fetch] UniProt step failed ({e.__class__.__name__}); "
+                      "continuing without signal-peptide trimming")
 
     seg, dis, wide, glyc = loops.run(res, prot, annot)
     express.run(seg, glyc)
