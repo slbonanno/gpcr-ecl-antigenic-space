@@ -207,6 +207,49 @@ composite, a recommended construct format (linear peptide / cyclic /
 folded ectodomain / cell-surface only), and plain-text flags. A ranking tool for
 deciding where to spend a construct, not a prediction.
 
+### Known problems with the construct-format call — read before using it
+
+Two calibration faults in `score_segment()`, found on the first full run
+(287 receptors, 2026-10-07). The sub-scores and flags are still informative;
+the **`recommended_format` column is not trustworthy yet**.
+
+**1. The glycan term is a cliff, not a gradient.** `s_glycan` is
+`clip(1 - (n_glyco/length)*25, 0, 1)`, so for any segment shorter than ~38 aa a
+**single** sequon or annotated glycosite drops it to 0 and forces
+`cell-surface only`. Measured thresholds:
+
+| segment length | sequons needed to force "cell-surface only" |
+|---|---|
+| 10–30 aa | 1 |
+| 40–60 aa | 2 |
+
+That is an artefact of the `*25` scale factor, not a judgement about how much
+surface a glycan actually occludes. It is what pushes 131/287 ECL1, 154/287
+ECL3 and 218/281 N-termini into that bucket. Fix is to scale the penalty by
+the fraction of the segment plausibly occluded by one glycan and to move
+glycan masking into the flags, where it informs rather than decides.
+
+**2. Single-cysteine ECL2 is called `linear peptide`, which is the one call it
+must never get.** ~90% of Class A ECL2s carry exactly one cysteine, and its
+partner is Cys3.25 — in TM3, *outside the loop*. An isolated ECL2 peptide
+therefore carries an unpaired free thiol with no native partner and will
+scramble or dimerise in an oxidising periplasm. The format rule only penalises
+odd cysteine counts **above** one, so `n_cys == 1` falls through to
+`linear peptide` (score ~0.65), while `n_cys == 3` is called `cell-surface
+only` — backwards, since both have a free thiol and the 3-Cys case at least
+has a partner available. Most of the ~160 ECL2s currently called
+`linear peptide` are wrong.
+
+Honest options for a single-Cys ECL2, none of which the code currently emits:
+Cys→Ser and accept the loss of the native constraint; display the loop with an
+engineered flanking Cys to recreate the tether; or go straight to whole-cell.
+The TM3-tether status in `results/disulfide_audit.csv` should be a first-class
+input to the format call, with a `cys_handling` column saying what to do with
+the free thiol.
+
+Until both are fixed, use `fold_index`, `s_length`, `n_cys`, `n_glyco` and the
+`flags` column directly and ignore `recommended_format`.
+
 ## Outputs
 
 ```
@@ -242,12 +285,33 @@ there lands around 0.13 — that's the null. Real ECL1/ECL3 should sit clearly
 above it within families and near it across families; if a real run comes back
 at 0.13 across the board, something upstream broke.
 
+## First full run — 2026-10-07
+
+287 human Class A receptors, non-olfactory, SwissProt only. 49 s end to end on
+a 16-core M-series Mac with the GPCRdb residue fetch already cached.
+
+Segment counts entering the pairwise analysis, after the `MIN_LOOP_LEN = 3`
+filter: ECL1 287, ECL2 282, N-term 281, ECL3 268, ECF 287. So 19 receptors
+have an ECL3 under 3 aa and 6 have effectively no N-terminus left once the
+signal peptide is trimmed. Both are plausible but unverified — filter
+`results/segments_long.csv` to `length < 3` to confirm they are genuinely
+stubby rather than annotation gaps.
+
+13 N-termini called `folded ectodomain`, none elsewhere. That should be the
+LGR4/5/6 and glycoprotein hormone receptor set; check `fshr_human`,
+`tshr_human`, `lgr5_human` are among them.
+
 ## Known gaps
 
+- The `recommended_format` column is miscalibrated in two ways — see "Known
+  problems with the construct-format call" above. Fix that before trusting it.
 - Sequence identity is a poor proxy for conformational epitope similarity. An
   ESM-2 or structure-based (AF2 / GPCRdb structure) comparison is the honest
   next step for whole-cell panning; not included.
 - Glycosylation is scored as sites/sequons, not occupancy.
+- Orphan status falls back on the GPR naming convention because no GPCRdb
+  family is named "orphan" — see `data/family_tree.csv`. Not verified against
+  an independent orphan list (IUPHAR would be the one to use).
 - Human-only by default. For a counter-screen matrix set `SPECIES = None` and
   add mouse/cyno orthologues — the pipeline is species-agnostic.
 
